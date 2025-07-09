@@ -1651,7 +1651,7 @@ func (v validator) validateNetworkHostAndDomainName(
 }
 
 func (v validator) validateCdrom(
-	ctx *pkgctx.WebhookRequestContext,
+	_ *pkgctx.WebhookRequestContext,
 	vm *vmopv1.VirtualMachine) field.ErrorList {
 	var allErrs field.ErrorList
 
@@ -1811,7 +1811,7 @@ func (v validator) validateChecksAnnotation(
 }
 
 func (v validator) validateNextPowerStateChangeTimeFormat(
-	ctx *pkgctx.WebhookRequestContext,
+	_ *pkgctx.WebhookRequestContext,
 	vm *vmopv1.VirtualMachine) field.ErrorList {
 
 	var allErrs field.ErrorList
@@ -1831,7 +1831,7 @@ func (v validator) validateNextPowerStateChangeTimeFormat(
 }
 
 func (v validator) validateBootOptions(
-	ctx *pkgctx.WebhookRequestContext,
+	_ *pkgctx.WebhookRequestContext,
 	vm *vmopv1.VirtualMachine) field.ErrorList {
 
 	var allErrs field.ErrorList
