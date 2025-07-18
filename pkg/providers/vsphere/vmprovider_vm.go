@@ -11,7 +11,6 @@ import (
 	"maps"
 	"math/rand"
 	"path"
-	"reflect"
 	"strings"
 	"sync"
 	"text/template"
@@ -1136,11 +1135,6 @@ func (vs *vSphereVMProvider) reconcilePowerState(
 func (vs *vSphereVMProvider) reconcileSnapshot(
 	vmCtx pkgctx.VirtualMachineContext,
 	vcVM *object.VirtualMachine) error {
-	// Skip creating a new snapshot if the VM already points to the desired snapshot.
-	if vmCtx.VM.Spec.CurrentSnapshot == nil || reflect.DeepEqual(vmCtx.VM.Spec.CurrentSnapshot, vmCtx.VM.Status.CurrentSnapshot) {
-		return nil
-	}
-
 	// get VirtualMachineSnapshot object
 	vmSnapshot, err := getVirtualMachineSnapShotObject(vmCtx, vs.k8sClient)
 	if err != nil {
