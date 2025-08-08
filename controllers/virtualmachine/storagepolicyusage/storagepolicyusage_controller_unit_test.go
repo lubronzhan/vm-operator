@@ -921,7 +921,7 @@ func unitTestsReconcileSPUForVMSnapshot() {
 			listOfVMs = append(listOfVMs, *vm2)
 		}
 
-		err = reconciler.ReconcileSPUForVMSnapshot(ctx, inNamespace, inName, listOfVMs)
+		err = reconciler.ReconcileSPUForVMSnapshot(ctx, ctx.Logger, inNamespace, inName, listOfVMs)
 	})
 
 	When("there is no StoragePolicyUsage resource", func() {
