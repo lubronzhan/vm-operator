@@ -318,11 +318,7 @@ func reconcileStatusSnapshot(
 	_ ReconcileStatusData) []error {
 
 	var errs []error
-
-	if err := updateCurrentSnapshotStatus(vmCtx, k8sClient); err != nil {
-		errs = append(errs, err)
-	}
-	if err := updateRootSnapshots(vmCtx, k8sClient); err != nil {
+	if err := SyncVMSnapshotTreeStatus(vmCtx, k8sClient); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -1424,11 +1420,145 @@ func updateProbeStatusGuestInfo(
 	return probeResultSuccess, ""
 }
 
+// SyncVMSnapshotTreeStatus syncs whole snapshot tree by
+// recursivly updating snapshots' childrenList status
+// and updates the VM's current and root snapshots status.
+func SyncVMSnapshotTreeStatus(
+	vmCtx pkgctx.VirtualMachineContext,
+	k8sClient ctrlclient.Client) error {
+	vmCtx.Logger.V(4).Info("Syncing snapshot tree status")
+
+	// Process the whole snapshot tree in updateSnapshotTreeChildrenStatus, and store
+	// the snapshot custom resources in this map.
+	// This map can be used in other functions later.
+	vmSnapshotMap := map[string]*vmopv1.VirtualMachineSnapshot{}
+	if err := updateSnapshotTreeChildrenStatus(vmCtx, k8sClient, vmSnapshotMap); err != nil {
+		return err
+	}
+
+	if err := updateCurrentSnapshotStatus(vmCtx, vmSnapshotMap); err != nil {
+		return err
+	}
+
+	return updateRootSnapshots(vmCtx, vmSnapshotMap)
+}
+
+// Reconciles Status.Children for every snapshot in the VM's snapshot tree.
+// Depth-first recursion
+func updateSnapshotTreeChildrenStatus(
+	vmCtx pkgctx.VirtualMachineContext,
+	k8sClient ctrlclient.Client,
+	vmSnapshotMap map[string]*vmopv1.VirtualMachineSnapshot) error {
+	mo := vmCtx.MoVM
+	if mo.Snapshot == nil || len(mo.Snapshot.RootSnapshotList) == 0 {
+		return nil
+	}
+
+	// walk returns the LocalObjectRef for the current node (if CR exists),
+	// and ensures its Status.Children is up-to-date. It recurses into children.
+	// It returns nil if the snapshot custom resource is not found.
+	var walk func(vimtypes.VirtualMachineSnapshotTree) (*common.LocalObjectRef, error)
+
+	walk = func(node vimtypes.VirtualMachineSnapshotTree) (*common.LocalObjectRef, error) {
+		curSnapshot, err := getSnapshotCR(vmCtx, k8sClient, node.Name, vmSnapshotMap)
+		if err != nil {
+			vmCtx.Logger.Error(err, "Failed to get snapshot custom resource", "snapshotName", node.Name)
+			return nil, err
+		}
+
+		if curSnapshot == nil {
+			// TODO (Lubron): This is for external snapshots.
+			vmCtx.Logger.V(4).Info("Snapshot custom resource not found, skipping",
+				"snapshotName", node.Name)
+			return nil, nil
+		}
+
+		// Recurse into children and collect their refs (only if their CRs exist).
+		children := make([]common.LocalObjectRef, 0, len(node.ChildSnapshotList))
+		for i := range node.ChildSnapshotList {
+			child := node.ChildSnapshotList[i]
+			ref, err := walk(child)
+			if err != nil {
+				return nil, err
+			}
+			// TODO (Lubron): If ref is nil, it means the snapshot custom resource is not found
+			// and it's an external snapshot.
+			if ref != nil {
+				children = append(children, *ref)
+			}
+		}
+
+		// Update Status.Children if changed.
+		if !reflect.DeepEqual(curSnapshot.Status.Children, children) {
+			patch := ctrlclient.MergeFrom(curSnapshot.DeepCopy())
+			curSnapshot.Status.Children = children
+			if err := k8sClient.Status().Patch(vmCtx, curSnapshot, patch); err != nil {
+				vmCtx.Logger.Error(err, "Failed to update snapshot children status", "snapshotName", curSnapshot.Name)
+				return nil, err
+			}
+		}
+
+		// Return this node's LocalObjectRef to the parent.
+		curSnapshotRef := common.LocalObjectRef{
+			APIVersion: curSnapshot.APIVersion,
+			Kind:       curSnapshot.Kind,
+			Name:       curSnapshot.Name,
+		}
+		return &curSnapshotRef, nil
+	}
+
+	for _, root := range mo.Snapshot.RootSnapshotList {
+		if _, err := walk(root); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// getSnapshotCR gets the snapshot custom resource by name.
+// First try fetching from the vmSnapshotMap.
+// If not found, it fetches from the k8s client.
+// If the snapshot custom resource is found, it returns the snapshot custom resource
+// and adds it to the vmSnapshotMap.
+// If the snapshot custom resource is not found, it returns nil for now.
+func getSnapshotCR(
+	vmCtx pkgctx.VirtualMachineContext,
+	k8sClient ctrlclient.Client,
+	snapshotName string,
+	vmSnapshotMap map[string]*vmopv1.VirtualMachineSnapshot) (*vmopv1.VirtualMachineSnapshot, error) {
+
+	vmSnapshot := &vmopv1.VirtualMachineSnapshot{}
+	if _, ok := vmSnapshotMap[snapshotName]; !ok {
+		objKey := ctrlclient.ObjectKey{
+			Name:      snapshotName,
+			Namespace: vmCtx.VM.Namespace,
+		}
+
+		if err := k8sClient.Get(vmCtx, objKey, vmSnapshot); err != nil {
+			if !apierrors.IsNotFound(err) {
+				vmCtx.Logger.Error(err, "Failed to get VirtualMachineSnapshot custom resource",
+					"snapshotName", snapshotName)
+				return nil, err
+			}
+
+			// TODO (Lubron): We can just store an object with External kind
+			// Skip for now
+			vmCtx.Logger.V(4).Info("VirtualMachineSnapshot custom resource not found, skipping",
+				"snapshotName", snapshotName)
+			return nil, nil
+		} else {
+			vmSnapshotMap[snapshotName] = vmSnapshot
+		}
+	}
+
+	return vmSnapshotMap[snapshotName], nil
+}
+
 // updateCurrentSnapshotStatus updates the VM status to reflect the
 // current snapshot on the VM.
 func updateCurrentSnapshotStatus(
 	vmCtx pkgctx.VirtualMachineContext,
-	k8sClient ctrlclient.Client) error {
+	vmSnapshotMap map[string]*vmopv1.VirtualMachineSnapshot) error {
 
 	vmCtx.Logger.V(5).Info("Updating current snapshot in VM status")
 
@@ -1471,24 +1601,16 @@ func updateCurrentSnapshotStatus(
 		"snapshotName", snapshotName,
 		"snapshotRef", currentSnapMoref.Value)
 
+	fmt.Println("vmSnapshotMap", vmSnapshotMap)
+	fmt.Println("snapshotName", snapshotName)
 	// Check if there's a VirtualMachineSnapshot custom resource with this name.
-	vmSnapshot := &vmopv1.VirtualMachineSnapshot{}
-	objKey := ctrlclient.ObjectKey{
-		Name:      snapshotName,
-		Namespace: vm.Namespace,
-	}
-
-	if err := k8sClient.Get(vmCtx, objKey, vmSnapshot); err != nil {
-		if !apierrors.IsNotFound(err) {
-			vmCtx.Logger.Error(err, "Failed to get VirtualMachineSnapshot custom resource",
-				"snapshotName", snapshotName)
-			return err
-		}
-		// Snapshot custom resource doesn't exist, clear the status.
+	vmSnapshot, ok := vmSnapshotMap[snapshotName]
+	if !ok {
+		// TODO (Lubron): This is for external snapshots.
 		vmCtx.Logger.V(4).Info("VirtualMachineSnapshot custom resource not found, clearing status",
 			"snapshotName", snapshotName)
 		vm.Status.CurrentSnapshot = nil
-
+		fmt.Println("really????????????????????????")
 		return nil
 	}
 
@@ -1533,7 +1655,9 @@ func FindSnapshotNameInTree(snapshots []vimtypes.VirtualMachineSnapshotTree, tar
 
 // updateRootSnapshots updates the VM status to reflect the
 // root snapshots on the VM.
-func updateRootSnapshots(vmCtx pkgctx.VirtualMachineContext, k8sClient ctrlclient.Client) error {
+func updateRootSnapshots(
+	vmCtx pkgctx.VirtualMachineContext,
+	vmSnapshotMap map[string]*vmopv1.VirtualMachineSnapshot) error {
 	vmCtx.Logger.V(4).Info("Updating root snapshots in VM status")
 
 	vm := vmCtx.VM
@@ -1558,23 +1682,10 @@ func updateRootSnapshots(vmCtx pkgctx.VirtualMachineContext, k8sClient ctrlclien
 	// Refresh the root snapshots from the VM mo
 	var newRootSnapshots []common.LocalObjectRef //nolint:prealloc
 	for _, rootSnapshot := range vmCtx.MoVM.Snapshot.RootSnapshotList {
-		objKey := ctrlclient.ObjectKey{
-			Name:      rootSnapshot.Name,
-			Namespace: vm.Namespace,
-		}
-
-		rootSnapshotCR := &vmopv1.VirtualMachineSnapshot{}
-		if err := k8sClient.Get(vmCtx, objKey, rootSnapshotCR); err != nil {
-			if !apierrors.IsNotFound(err) {
-				vmCtx.Logger.Error(err, "Failed to get VirtualMachineSnapshot custom resource",
-					"snapshotName", rootSnapshot.Name)
-				return err
-			}
-			// TODO (lubron) Snapshot custom resource doesn't exist, but the snapshot
-			// could be created by admin on the vSphere. We will reference these kind
-			// of snapshots in other way, like externally created snapshots, so the snapshot
-			// graph reflects the actual state of the VM in vSphere.
-			vmCtx.Logger.V(4).Info("VirtualMachineSnapshot custom resource not found, skipping",
+		rootSnapshotCR, ok := vmSnapshotMap[rootSnapshot.Name]
+		if !ok {
+			// TODO (Lubron): This is for external snapshots.
+			vmCtx.Logger.V(4).Info("Snapshot custom resource not found, skipping",
 				"snapshotName", rootSnapshot.Name)
 			continue
 		}

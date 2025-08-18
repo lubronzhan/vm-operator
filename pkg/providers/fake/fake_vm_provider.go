@@ -59,8 +59,8 @@ type funcs struct {
 	DoesProfileSupportEncryptionFn func(ctx context.Context, profileID string) (bool, error)
 	VSphereClientFn                func(context.Context) (*vsclient.Client, error)
 	DeleteSnapshotFn               func(ctx context.Context, vmSnapshot *vmopv1.VirtualMachineSnapshot, vm *vmopv1.VirtualMachine, removeChildren bool, consolidate *bool) (bool, error)
-	GetParentSnapshotFn            func(ctx context.Context, vmSnapshotName string, vm *vmopv1.VirtualMachine) (*vimtypes.VirtualMachineSnapshotTree, error)
 	GetSnapshotSizeFn              func(ctx context.Context, vmSnapshotName string, vm *vmopv1.VirtualMachine) (int64, error)
+	SyncVMSnapshotTreeStatusFn     func(ctx context.Context, vm *vmopv1.VirtualMachine) error
 }
 
 type VMProvider struct {
@@ -405,17 +405,6 @@ func (s *VMProvider) DeleteSnapshot(
 	return false, nil
 }
 
-func (s *VMProvider) GetParentSnapshot(ctx context.Context, vmSnapshotName string, vm *vmopv1.VirtualMachine) (*vimtypes.VirtualMachineSnapshotTree, error) {
-	_ = pkgcfg.FromContext(ctx)
-
-	s.Lock()
-	defer s.Unlock()
-	if s.GetParentSnapshotFn != nil {
-		return s.GetParentSnapshotFn(ctx, vmSnapshotName, vm)
-	}
-	return nil, nil
-}
-
 func (s *VMProvider) GetSnapshotSize(ctx context.Context, vmSnapshotName string, vm *vmopv1.VirtualMachine) (int64, error) {
 	_ = pkgcfg.FromContext(ctx)
 
@@ -425,6 +414,17 @@ func (s *VMProvider) GetSnapshotSize(ctx context.Context, vmSnapshotName string,
 		return s.GetSnapshotSizeFn(ctx, vmSnapshotName, vm)
 	}
 	return 0, nil
+}
+
+func (s *VMProvider) SyncVMSnapshotTreeStatus(ctx context.Context, vm *vmopv1.VirtualMachine) error {
+	_ = pkgcfg.FromContext(ctx)
+
+	s.Lock()
+	defer s.Unlock()
+	if s.SyncVMSnapshotTreeStatusFn != nil {
+		return s.SyncVMSnapshotTreeStatusFn(ctx, vm)
+	}
+	return nil
 }
 
 func NewVMProvider() *VMProvider {
