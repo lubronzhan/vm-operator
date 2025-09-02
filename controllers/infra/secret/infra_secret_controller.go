@@ -21,9 +21,9 @@ import (
 
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
 	pkgctx "github.com/vmware-tanzu/vm-operator/pkg/context"
+	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	pkgmgr "github.com/vmware-tanzu/vm-operator/pkg/manager"
 	"github.com/vmware-tanzu/vm-operator/pkg/record"
-	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	kubeutil "github.com/vmware-tanzu/vm-operator/pkg/util/kube"
 )
 
@@ -46,11 +46,11 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 	}
 
 	// This controller only watches Secrets in the pod namespace.
-	cache, err := pkgmgr.NewNamespacedCacheForObject(
+	cache, err := pkgmgr.NewCacheForObjectWithObjectKey(
 		mgr,
 		&ctx.SyncPeriod,
 		controlledType,
-		vcCredsKey.Namespace)
+		vcCredsKey)
 	if err != nil {
 		return err
 	}

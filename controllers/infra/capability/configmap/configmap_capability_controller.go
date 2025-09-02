@@ -24,9 +24,9 @@ import (
 	"github.com/vmware-tanzu/vm-operator/pkg/config/capabilities"
 	pkgctx "github.com/vmware-tanzu/vm-operator/pkg/context"
 	pkgexit "github.com/vmware-tanzu/vm-operator/pkg/exit"
+	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	pkgmgr "github.com/vmware-tanzu/vm-operator/pkg/manager"
 	"github.com/vmware-tanzu/vm-operator/pkg/record"
-	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	kubeutil "github.com/vmware-tanzu/vm-operator/pkg/util/kube"
 )
 
@@ -39,11 +39,11 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 		controllerNameLong  = fmt.Sprintf("%s/%s/%s", ctx.Namespace, ctx.Name, controllerNameShort)
 	)
 
-	cache, err := pkgmgr.NewNamespacedCacheForObject(
+	cache, err := pkgmgr.NewCacheForObjectWithObjectKey(
 		mgr,
 		&ctx.SyncPeriod,
 		controlledType,
-		capabilities.ConfigMapKey.Namespace)
+		capabilities.ConfigMapKey)
 	if err != nil {
 		return err
 	}

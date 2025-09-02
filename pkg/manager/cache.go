@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -61,46 +62,6 @@ func NewLabelSelectorCacheForObject(
 	return cache, nil
 }
 
-// NewNamespacedCacheForObject creates a new cache that watches the specified
-// object type only for the specified namespaces. The cache is added to the
-// manager and starts alongside the other leader-election runnables.
-func NewNamespacedCacheForObject(
-	mgr ctrlmgr.Manager,
-	resync *time.Duration,
-	object ctrlclient.Object,
-	namespaces ...string) (ctrlcache.Cache, error) {
-
-	cache, err := ctrlcache.New(mgr.GetConfig(),
-		ctrlcache.Options{
-			Scheme:           mgr.GetScheme(),
-			Mapper:           mgr.GetRESTMapper(),
-			DefaultTransform: ctrlcache.TransformStripManagedFields(),
-			SyncPeriod:       resync,
-			ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
-				object: {
-					Namespaces: GetNamespaceCacheConfigs(namespaces...),
-				},
-			},
-		},
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf(
-			"failed to create cache for %T for namespaces %v: %w",
-			object, namespaces, err)
-	}
-
-	c := &implHasCache{Cache: cache}
-
-	if err := mgr.Add(c); err != nil {
-		return nil, fmt.Errorf(
-			"failed to add cache for %T for namespaces %v: %w",
-			object, namespaces, err)
-	}
-
-	return cache, nil
-}
-
 // GetNamespaceCacheConfigs returns a map of cache configurations for the
 // provided namespaces. A nil value is returned if the provided list is
 // empty or has a single, empty element.
@@ -118,4 +79,45 @@ func GetNamespaceCacheConfigs(namespaces ...string) map[string]ctrlcache.Config 
 		}
 	}
 	return nsc
+}
+
+// NewCacheForObjectWithObjectKey creates a new cache that watches the
+// object specified by the object key. The cache is added to the
+// manager and starts alongside the other leader-election runnables.
+func NewCacheForObjectWithObjectKey(
+	mgr ctrlmgr.Manager,
+	resync *time.Duration,
+	object ctrlclient.Object,
+	objectKey ctrlclient.ObjectKey) (ctrlcache.Cache, error) {
+
+	cache, err := ctrlcache.New(mgr.GetConfig(),
+		ctrlcache.Options{
+			Scheme:           mgr.GetScheme(),
+			Mapper:           mgr.GetRESTMapper(),
+			DefaultTransform: ctrlcache.TransformStripManagedFields(),
+			SyncPeriod:       resync,
+			ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
+				object: {
+					Namespaces: GetNamespaceCacheConfigs(objectKey.Namespace),
+					Field:      fields.OneTermEqualSelector("metadata.name", objectKey.Name),
+				},
+			},
+		},
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to create cache for %T for object with object key %v: %w",
+			object, objectKey, err)
+	}
+
+	c := &implHasCache{Cache: cache}
+
+	if err := mgr.Add(c); err != nil {
+		return nil, fmt.Errorf(
+			"failed to add cache for %T for object with object key %v: %w",
+			object, objectKey, err)
+	}
+
+	return cache, nil
 }

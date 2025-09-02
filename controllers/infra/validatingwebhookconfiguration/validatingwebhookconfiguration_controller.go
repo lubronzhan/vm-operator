@@ -25,9 +25,9 @@ import (
 	spqv1 "github.com/vmware-tanzu/vm-operator/external/storage-policy-quota/api/v1alpha2"
 	pkgcfg "github.com/vmware-tanzu/vm-operator/pkg/config"
 	pkgctx "github.com/vmware-tanzu/vm-operator/pkg/context"
+	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	pkgmgr "github.com/vmware-tanzu/vm-operator/pkg/manager"
 	"github.com/vmware-tanzu/vm-operator/pkg/record"
-	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	kubeutil "github.com/vmware-tanzu/vm-operator/pkg/util/kube"
 	spqutil "github.com/vmware-tanzu/vm-operator/pkg/util/kube/spq"
 )
@@ -57,7 +57,14 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 		return err
 	}
 
-	cache, err := pkgmgr.NewNamespacedCacheForObject(mgr, &ctx.SyncPeriod, controlledType)
+	validatingWebhookConfigKey := client.ObjectKey{
+		Name: spqutil.ValidatingWebhookConfigName,
+	}
+
+	cache, err := pkgmgr.NewCacheForObjectWithObjectKey(mgr,
+		&ctx.SyncPeriod,
+		controlledType,
+		validatingWebhookConfigKey)
 	if err != nil {
 		return err
 	}
