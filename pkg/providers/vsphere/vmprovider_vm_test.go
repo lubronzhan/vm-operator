@@ -3158,6 +3158,53 @@ func vmTests() {
 					})
 				})
 
+				Context("revert to current snapshot when VM has immutable labels", func() {
+					It("should succeed and keep immutable labels", func() {
+						// Create snapshot CR to trigger a snapshot workflow.
+						Expect(ctx.Client.Create(ctx, vmSnapshot)).To(Succeed())
+
+						// Snapshot should be owned by the VM resource.
+						o := vmopv1.VirtualMachine{}
+						Expect(ctx.Client.Get(ctx, client.ObjectKeyFromObject(vm), &o)).To(Succeed())
+						Expect(controllerutil.SetOwnerReference(&o, vmSnapshot, ctx.Scheme)).To(Succeed())
+						Expect(ctx.Client.Update(ctx, vmSnapshot)).To(Succeed())
+						// Create VM so snapshot is also created.
+						Expect(createOrUpdateVM(ctx, vmProvider, vm)).To(Succeed())
+
+						// Mark the snapshot as ready so that revert can proceed.
+						Expect(ctx.Client.Get(ctx,
+							client.ObjectKeyFromObject(vmSnapshot), vmSnapshot)).To(Succeed())
+						conditions.MarkTrue(vmSnapshot, vmopv1.VirtualMachineSnapshotReadyCondition)
+						Expect(ctx.Client.Status().Update(ctx, vmSnapshot)).To(Succeed())
+
+						// Add immutable labels to the VM.
+						vm.Labels[topology.KubernetesTopologyZoneLabelKey] = "zone1"
+						vm.Labels[topology.KubernetesTopologyHostLabelKey] = "host1"
+
+						// Set desired snapshot to point to the above snapshot.
+						vm.Spec.CurrentSnapshot = &vmopv1common.LocalObjectRef{
+							APIVersion: vmSnapshot.APIVersion,
+							Kind:       vmSnapshot.Kind,
+							Name:       vmSnapshot.Name,
+						}
+
+						Expect(createOrUpdateVM(ctx, vmProvider, vm)).To(Succeed())
+
+						// Verify the VM has the immutable labels.
+						Expect(vm.Labels[topology.KubernetesTopologyZoneLabelKey]).To(Equal("zone1"))
+						Expect(vm.Labels[topology.KubernetesTopologyHostLabelKey]).To(Equal("host1"))
+
+						// Verify VM status reflects current snapshot.
+						Expect(vm.Status.CurrentSnapshot).ToNot(BeNil())
+						Expect(vm.Status.CurrentSnapshot.Name).To(Equal(vmSnapshot.Name))
+
+						// Verify the status has root snapshots.
+						Expect(vm.Status.RootSnapshots).ToNot(BeNil())
+						Expect(vm.Status.RootSnapshots).To(HaveLen(1))
+						Expect(vm.Status.RootSnapshots[0].Name).To(Equal(vmSnapshot.Name))
+					})
+				})
+
 				Context("when reverting to valid snapshot", func() {
 					var secondSnapshot *vmopv1.VirtualMachineSnapshot
 

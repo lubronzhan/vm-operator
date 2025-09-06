@@ -32,6 +32,7 @@ import (
 	pkglog "github.com/vmware-tanzu/vm-operator/pkg/log"
 	"github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/virtualmachine"
 	"github.com/vmware-tanzu/vm-operator/pkg/providers/vsphere/vmlifecycle"
+	"github.com/vmware-tanzu/vm-operator/pkg/topology"
 	pkgutil "github.com/vmware-tanzu/vm-operator/pkg/util"
 	kubeutil "github.com/vmware-tanzu/vm-operator/pkg/util/kube"
 )
@@ -445,10 +446,11 @@ func (vs *vSphereVMProvider) restoreVMSpecFromSnapshot(
 	// clear it out.
 	vmCtx.VM.Spec.CurrentSnapshot = nil
 
-	// TODO: AKP: We need to merge (and skip) some labels so that we
-	// are not simply reverting to the previous labels. Otherwise, we
-	// risk the VM being impacted after a snapshot revert.
-	vmCtx.VM.Labels = maps.Clone(vm.Labels)
+	vmCtx.VM.Labels = mergeLabels(vmCtx.VM.Labels, vm.Labels)
+	// TODO (Lubron): do we also need to keep annotations like
+	// "csi.vsphere.volume-requested-topology",
+	// "csi.vsphere.volume-accessible-topology",
+	// "csi.vsphere.volume.sync"?
 	vmCtx.VM.Annotations = maps.Clone(vm.Annotations)
 	// Empty out the status.
 	vmCtx.VM.Status = vmopv1.VirtualMachineStatus{}
@@ -862,4 +864,23 @@ func (vs *vSphereVMProvider) unmarshalAndConvertVMFromYAML(
 	}
 
 	return vm, nil
+}
+
+// mergeLabels merges the current labels with the backup labels, keeping some of
+// the current labels which are immutable. Otherwise, we risk the VM being impacted
+// after a snapshot revert.
+func mergeLabels(currentLabels, backupLabels map[string]string) map[string]string {
+	m := maps.Clone(backupLabels)
+	if m == nil {
+		m = map[string]string{}
+	}
+
+	// check if topology related labels are present in the current
+	if v, ok := currentLabels[topology.KubernetesTopologyZoneLabelKey]; ok {
+		m[topology.KubernetesTopologyZoneLabelKey] = v
+	}
+	if v, ok := currentLabels[topology.KubernetesTopologyHostLabelKey]; ok {
+		m[topology.KubernetesTopologyHostLabelKey] = v
+	}
+	return m
 }
