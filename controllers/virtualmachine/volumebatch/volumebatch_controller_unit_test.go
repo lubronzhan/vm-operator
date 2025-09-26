@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -355,6 +356,102 @@ var _ = Describe("Volume Batch Controller", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("has a different controlling owner"))
 			Expect(result).To(BeNil())
+		})
+	})
+
+	Context("ReconcileDelete", func() {
+		When("VM is marked for deletion", func() {
+			var volCtx *pkgctx.VolumeContext
+			BeforeEach(func() {
+				now := metav1.Now()
+				vm := &vmopv1.VirtualMachine{}
+				vm.DeletionTimestamp = &now
+
+				volCtx = &pkgctx.VolumeContext{
+					Context: context.Background(),
+					Logger:  log.Log,
+					VM:      vm,
+				}
+			})
+
+			It("returns success", func() {
+				err := reconciler.ReconcileDelete(volCtx)
+				Expect(err).ToNot(HaveOccurred())
+			})
+		})
+	})
+
+	Context("ProcessBatchAttachment", func() {
+		var (
+			volCtx     *pkgctx.VolumeContext
+			attachment *cnsv1alpha1.CnsNodeVmBatchAttachment
+			scheme     *runtime.Scheme
+		)
+		BeforeEach(func() {
+			vm := &vmopv1.VirtualMachine{}
+			volCtx = &pkgctx.VolumeContext{
+				Context: context.Background(),
+				Logger:  log.Log,
+				VM:      vm,
+			}
+			attachment = &cnsv1alpha1.CnsNodeVmBatchAttachment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vm",
+					Namespace: "test-namespace",
+				},
+			}
+			scheme = runtime.NewScheme()
+			Expect(vmopv1.AddToScheme(scheme)).To(Succeed())
+			Expect(cnsv1alpha1.AddToScheme(scheme)).To(Succeed())
+		})
+
+		When("There is no volume for the VM", func() {
+			It("should delete the batchattachement", func() {
+				fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(attachment).Build()
+				reconciler := volumebatch.NewReconciler(
+					context.Background(),
+					fakeClient,
+					log.Log,
+					record.New(nil),
+				)
+
+				err := reconciler.ProcessBatchAttachment(volCtx, attachment)
+				Expect(err).ToNot(HaveOccurred())
+				err = fakeClient.Get(volCtx, client.ObjectKey{
+					Name:      attachment.Name,
+					Namespace: attachment.Namespace,
+				}, attachment)
+				Expect(err).To(HaveOccurred())
+				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			})
+		})
+
+		When("Volume doesn't have PVC", func() {
+			BeforeEach(func() {
+				volCtx.VM.Spec.Volumes = []vmopv1.VirtualMachineVolume{
+					{
+						Name: "not-pvc",
+					},
+				}
+			})
+			It("should delete the batchattachement", func() {
+				fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(attachment).Build()
+				reconciler := volumebatch.NewReconciler(
+					context.Background(),
+					fakeClient,
+					log.Log,
+					record.New(nil),
+				)
+
+				err := reconciler.ProcessBatchAttachment(volCtx, attachment)
+				Expect(err).ToNot(HaveOccurred())
+				err = fakeClient.Get(volCtx, client.ObjectKey{
+					Name:      attachment.Name,
+					Namespace: attachment.Namespace,
+				}, attachment)
+				Expect(err).To(HaveOccurred())
+				Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			})
 		})
 	})
 })

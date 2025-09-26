@@ -51,6 +51,7 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 		mgr.GetClient(),
 		ctrl.Log.WithName("controllers").WithName("volumebatch"),
 		record.New(mgr.GetEventRecorderFor(controllerNameLong)),
+		// ctx.VMProvider,
 	)
 
 	c, err := controller.New(controllerName, mgr, controller.Options{
@@ -92,12 +93,15 @@ func NewReconciler(
 	ctx context.Context,
 	client client.Client,
 	logger logr.Logger,
-	recorder record.Recorder) *Reconciler {
+	recorder record.Recorder,
+	// vmProvider providers.VirtualMachineProviderInterface,
+) *Reconciler {
 	return &Reconciler{
 		Context:  ctx,
 		Client:   client,
 		logger:   logger,
 		recorder: recorder,
+		// VMProvider: vmProvider,
 	}
 }
 
@@ -156,8 +160,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (_ ctr
 	}()
 
 	if !vm.DeletionTimestamp.IsZero() {
-		// TODO: Handle deletion/detachment in future iterations
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.ReconcileDelete(volCtx)
 	}
 
 	if err := r.ReconcileNormal(volCtx); err != nil {
@@ -171,6 +174,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (_ ctr
 }
 
 func (r *Reconciler) ReconcileNormal(ctx *pkgctx.VolumeContext) error {
+
 	ctx.Logger.Info("Reconciling VirtualMachine for batch volume processing")
 	defer func() {
 		ctx.Logger.Info("Finished Reconciling VirtualMachine for batch volume processing")
@@ -192,12 +196,9 @@ func (r *Reconciler) ReconcileNormal(ctx *pkgctx.VolumeContext) error {
 		return nil
 	}
 
-	// Add hardware version validation
-	if err := r.validateHardwareVersion(ctx); err != nil {
-		return fmt.Errorf("hardware version validation failed: %w", err)
-	}
-
 	// Get existing batch attachment for this VM
+	// If there is no existing batchAttachment, both batchAttachment and error
+	// are nil.
 	batchAttachment, err := r.GetBatchAttachmentForVM(ctx)
 	if err != nil {
 		ctx.Logger.Error(err, "Error getting existing CnsNodeVmBatchAttachment for VM")
@@ -205,14 +206,17 @@ func (r *Reconciler) ReconcileNormal(ctx *pkgctx.VolumeContext) error {
 	}
 
 	// Handle existing batch attachment conflicts
-	if batchAttachment != nil {
-		if err := r.handleExistingBatchAttachment(ctx, batchAttachment); err != nil {
-			return fmt.Errorf("failed to handle existing batch attachment: %w", err)
+	if batchAttachment == nil {
+		// Add hardware version validation only when we create the batch attachment
+		// for the first time. If there is an attachment, that means we've
+		// already done validation.
+		if err := r.validateHardwareVersion(ctx); err != nil {
+			return fmt.Errorf("hardware version validation failed: %w", err)
 		}
 	}
 
 	// Process volumes and create/update batch attachment
-	if err := r.processBatchAttachment(ctx, batchAttachment); err != nil {
+	if err := r.ProcessBatchAttachment(ctx, batchAttachment); err != nil {
 		ctx.Logger.Error(err, "Error processing CnsNodeVmBatchAttachment")
 		return err
 	}
@@ -223,7 +227,9 @@ func (r *Reconciler) ReconcileNormal(ctx *pkgctx.VolumeContext) error {
 // GetBatchAttachmentForVM returns the CnsNodeVmBatchAttachment
 // resource for the VM. We assume that the name of the resource
 // matches the name of the VM.
-func (r *Reconciler) GetBatchAttachmentForVM(ctx *pkgctx.VolumeContext) (*cnsv1alpha1.CnsNodeVmBatchAttachment, error) {
+func (r *Reconciler) GetBatchAttachmentForVM(
+	ctx *pkgctx.VolumeContext) (*cnsv1alpha1.CnsNodeVmBatchAttachment, error) {
+
 	attachment := &cnsv1alpha1.CnsNodeVmBatchAttachment{}
 
 	if err := r.Client.Get(ctx, client.ObjectKey{
@@ -246,7 +252,7 @@ func (r *Reconciler) GetBatchAttachmentForVM(ctx *pkgctx.VolumeContext) (*cnsv1a
 	return attachment, nil
 }
 
-func (r *Reconciler) processBatchAttachment(
+func (r *Reconciler) ProcessBatchAttachment(
 	ctx *pkgctx.VolumeContext,
 	existingAttachment *cnsv1alpha1.CnsNodeVmBatchAttachment) error {
 
@@ -258,31 +264,24 @@ func (r *Reconciler) processBatchAttachment(
 		}
 	}
 
+	if len(pvcVolumes) == 0 {
+		// No PVC volumes to process
+		if existingAttachment != nil {
+			ctx.Logger.Info("Delete existing CnsNodeVmBatchAttachment since"+
+				" there is no PVC attached to it",
+				"attachment", existingAttachment.Name)
+			return r.Client.Delete(ctx, existingAttachment)
+		}
+
+		return nil
+	}
+
 	// Handle WFFC for each PVC volume
 	for _, vol := range pvcVolumes {
 		if err := r.handlePVCWithWFFC(ctx, vol); err != nil {
 			ctx.Logger.Error(err, "Failed to handle WFFC for volume", "volume", vol.Name)
 			// Continue processing other volumes
 		}
-	}
-
-	// Handle orphaned volume cleanup
-	if existingAttachment != nil {
-		if err := r.cleanupOrphanedVolumes(ctx, pvcVolumes); err != nil {
-			ctx.Logger.Error(err, "Failed to cleanup orphaned volumes")
-			// Continue with processing
-		}
-	}
-
-	if len(pvcVolumes) == 0 {
-		// No PVC volumes to process
-		if existingAttachment != nil {
-			// TODO: AKP: Delete existing CnsNodeVmBatchAttachmet or
-			// CnsNodeVmAttachment resource(s) when no volumes.
-			ctx.Logger.Info("Delete existing CnsNodeVmBatchAttachment",
-				"attachment", existingAttachment.Name)
-		}
-		return nil
 	}
 
 	// Use robust error handling for volume processing
@@ -568,12 +567,10 @@ func (r *Reconciler) updateVolumeStatusWithPVCInfo(
 // ReconcileDelete handles cleanup when a VirtualMachine is being deleted.
 // This method ensures proper cleanup of batch attachments and related resources.
 func (r *Reconciler) ReconcileDelete(ctx *pkgctx.VolumeContext) error {
-	// TODO: Implement VM deletion cleanup logic
-	// This method should:
-	// - Clean up CnsNodeVmBatchAttachment resources
-	// - Handle any pending volume operations
-	// - Ensure proper resource cleanup on VM deletion
-
+	// Do nothing here since we depend on the Garbage Collector to do the deletion of the
+	// dependent CNSNodeVMAttachment objects when their owning VM is deleted.
+	// We require the Volume provider to handle the situation where the VM is deleted before
+	// the volumes are detached & removed.
 	return nil
 }
 
@@ -603,19 +600,6 @@ func (r *Reconciler) handlePVCWithWFFC(_ *pkgctx.VolumeContext, _ vmopv1.Virtual
 	return nil
 }
 
-// cleanupOrphanedVolumes removes volumes that are no longer in the VM spec.
-// This handles the cleanup of volumes that have been removed from the desired state.
-func (r *Reconciler) cleanupOrphanedVolumes(_ *pkgctx.VolumeContext, _ []vmopv1.VirtualMachineVolume) error {
-	// TODO: Implement orphaned volume cleanup
-	// This method should:
-	// - Identify volumes in batch attachment but not in VM spec
-	// - Remove orphaned volumes from batch attachment
-	// - Preserve status information during cleanup
-	// - Handle cleanup errors gracefully
-
-	return nil
-}
-
 // processVolumesWithErrorHandling processes volumes with robust error handling.
 // This ensures partial failures don't prevent other volumes from being processed.
 func (r *Reconciler) processVolumesWithErrorHandling(_ *pkgctx.VolumeContext, _ []vmopv1.VirtualMachineVolume) error {
@@ -635,19 +619,6 @@ func (r *Reconciler) processVolumesWithErrorHandling(_ *pkgctx.VolumeContext, _ 
 	return nil
 }
 
-// handleExistingBatchAttachment handles conflicts with existing batch attachments.
-// This ensures proper behavior when batch attachments already exist.
-func (r *Reconciler) handleExistingBatchAttachment(_ *pkgctx.VolumeContext, _ *cnsv1alpha1.CnsNodeVmBatchAttachment) error {
-	// TODO: Implement existing batch attachment conflict resolution
-	// This method should:
-	// - Handle cases where batch attachment already exists
-	// - Resolve conflicts between desired and existing state
-	// - Manage concurrent updates to batch attachments
-	// - Ensure idempotent behavior
-
-	return nil
-}
-
 // validateHardwareVersion validates that the VM hardware version supports requested features.
 // This ensures compatibility between VM hardware version and volume features.
 func (r *Reconciler) validateHardwareVersion(_ *pkgctx.VolumeContext) error {
@@ -657,6 +628,21 @@ func (r *Reconciler) validateHardwareVersion(_ *pkgctx.VolumeContext) error {
 	// - Validate compatibility with requested volume features
 	// - Ensure controller types are supported by hardware version
 	// - Return appropriate errors for unsupported combinations
+
+	// hardwareVersion, err := r.VMProvider.GetVirtualMachineHardwareVersion(ctx, ctx.VM)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to get VM hardware version: %w", err)
+	// }
+
+	// // If hardware version is 0, which means we failed to parse the version from VM, then just assume that it
+	// // is above minimal requirement.
+	// if hardwareVersion.IsValid() && hardwareVersion < pkgconst.MinSupportedHWVersionForPVC {
+	// 	retErr := fmt.Errorf("vm has an unsupported "+
+	// 		"hardware version %d for PersistentVolumes. Minimum supported hardware version %d",
+	// 		hardwareVersion, pkgconst.MinSupportedHWVersionForPVC)
+	// 	r.recorder.EmitEvent(ctx.VM, "VolumeAttachment", retErr, true)
+	// 	return retErr
+	// }
 
 	return nil
 }
