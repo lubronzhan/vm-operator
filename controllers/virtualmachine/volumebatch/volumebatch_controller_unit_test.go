@@ -51,11 +51,12 @@ func unitTests() {
 
 func unitTestsReconcile() {
 	const (
-		ns            = "dummy-ns"
-		dummyBiosUUID = "dummy-bios-uuid"
-		dummyDiskUUID = "111-222-333-disk-uuid"
-		claimName1    = "pvc-volume-1"
-		claimName2    = "pvc-volume-2"
+		ns                = "dummy-ns"
+		dummyBiosUUID     = "dummy-bios-uuid"
+		dummyInstanceUUID = "dummy-instance-uuid"
+		dummyDiskUUID     = "111-222-333-disk-uuid"
+		claimName1        = "pvc-volume-1"
+		claimName2        = "pvc-volume-2"
 	)
 	var (
 		reconciler     *volumebatch.Reconciler
@@ -81,7 +82,8 @@ func unitTestsReconcile() {
 				Namespace: ns,
 			},
 			Status: vmopv1.VirtualMachineStatus{
-				BiosUUID: dummyBiosUUID,
+				BiosUUID:     dummyBiosUUID,
+				InstanceUUID: dummyInstanceUUID,
 			},
 		}
 
@@ -197,11 +199,11 @@ func unitTestsReconcile() {
 	}
 
 	Context("ReconcileNormal", func() {
-		When("VM does not have BiosUUID", func() {
+		When("VM does not have InstanceUUID", func() {
 			BeforeEach(func() {
 				vmVol = vmVolumeWithPVC1
 				vm.Spec.Volumes = append(vm.Spec.Volumes, *vmVol)
-				vm.Status.BiosUUID = ""
+				vm.Status.InstanceUUID = ""
 			})
 
 			It("returns success", func() {
@@ -1343,7 +1345,7 @@ func assertBatchAttachmentSpec(
 
 	GinkgoHelper()
 
-	Expect(attachment.Spec.NodeUUID).To(Equal(vm.Status.BiosUUID))
+	Expect(attachment.Spec.NodeUUID).To(Equal(vm.Status.InstanceUUID))
 
 	ownerRefs := attachment.GetOwnerReferences()
 	Expect(ownerRefs).To(HaveLen(1))
@@ -1373,7 +1375,7 @@ func cnsBatchAttachmentForVMVolume(
 			},
 		},
 		Spec: cnsv1alpha1.CnsNodeVmBatchAttachmentSpec{
-			NodeUUID: vm.Status.BiosUUID,
+			NodeUUID: vm.Status.InstanceUUID,
 			Volumes:  []cnsv1alpha1.VolumeSpec{},
 		},
 		Status: cnsv1alpha1.CnsNodeVmBatchAttachmentStatus{
