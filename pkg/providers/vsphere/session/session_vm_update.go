@@ -275,22 +275,6 @@ func (s *Session) reconcilePoweredOffOrPoweredOnVM(
 		return err
 	}
 
-	if pkgcfg.FromContext(vmCtx).Features.VMSharedDisks {
-		if err := reconcileVirtualControllers(
-			vmCtx,
-			s.K8sClient,
-			vmCtx.VM,
-			vcVM,
-			vmCtx.MoVM); err != nil {
-
-			return err
-		}
-	}
-
-	if err := s.reconcileVolumes(vmCtx); err != nil {
-		return err
-	}
-
 	if vmCtx.VM.Spec.GuestID == "" {
 		// Assume the guest ID is valid until we know otherwise.
 		conditions.Delete(vmCtx.VM, vmopv1.GuestIDReconfiguredCondition)
@@ -338,6 +322,10 @@ func (s *Session) reconcilePoweredOffOrPoweredOnVM(
 				return err
 			}
 		}
+	}
+
+	if err := s.reconcileVolumes(vmCtx); err != nil {
+		return err
 	}
 
 	return s.reconcileNetworkAndGuestCustomizationState(
@@ -410,6 +398,19 @@ func (s *Session) poweredOffReconfigure(
 	}
 	if err != nil {
 		return err
+	}
+
+	if pkgcfg.FromContext(vmCtx).Features.VMSharedDisks {
+		if err := reconcileVirtualControllers(
+			vmCtx,
+			s.K8sClient,
+			vmCtx.VM,
+			vcVM,
+			vmCtx.MoVM,
+			configSpec); err != nil {
+
+			return err
+		}
 	}
 
 	reconfigErr := doReconfigure(
@@ -872,6 +873,19 @@ func (s *Session) resizeVMWhenPoweredStateOff(
 		return err
 	}
 
+	if pkgcfg.FromContext(vmCtx).Features.VMSharedDisks {
+		if err := reconcileVirtualControllers(
+			vmCtx,
+			s.K8sClient,
+			vmCtx.VM,
+			vcVM,
+			vmCtx.MoVM,
+			&configSpec); err != nil {
+
+			return err
+		}
+	}
+
 	reconfigErr := doReconfigure(
 		logr.NewContext(
 			vmCtx,
@@ -1188,34 +1202,20 @@ func reconcileVirtualControllers(
 	k8sClient ctrlclient.Client,
 	vm *vmopv1.VirtualMachine,
 	vcVM *object.VirtualMachine,
-	moVM mo.VirtualMachine) error {
+	moVM mo.VirtualMachine,
+	configSpec *vimtypes.VirtualMachineConfigSpec) error {
 
 	pkglog.FromContextOrDefault(vmCtx).V(4).Info("Reconciling virtual controllers")
 
-	if vmCtx.MoVM.Runtime.PowerState != vimtypes.VirtualMachinePowerStatePoweredOff {
-		// As long as the VM is in powerOff state, we could reconfigure it.
-		// Otherwise continue silently with other reconfigure
-		return nil
-	}
-
-	configSpec := vimtypes.VirtualMachineConfigSpec{}
-
-	pkglog.FromContextOrDefault(vmCtx).V(4).Info("Reconciling vSphere policies")
-
-	vmconfvirtualcontroller.Reconcile(vmCtx,
+	if err := vmconfvirtualcontroller.Reconcile(
+		vmCtx,
 		k8sClient,
 		vcVM.Client(),
 		vm,
 		moVM,
-		&configSpec)
+		configSpec); err != nil {
 
-	if len(configSpec.DeviceChange) > 0 {
-		resVM := res.NewVMFromObject(vcVM)
-		if _, err := resVM.Reconfigure(vmCtx, &configSpec); err != nil {
-			return err
-		}
-
-		return ErrReconfigure
+		return err
 	}
 
 	return nil
