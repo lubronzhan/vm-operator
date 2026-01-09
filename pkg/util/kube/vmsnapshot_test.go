@@ -94,6 +94,11 @@ var _ = Describe("CalculateReservedForSnapshot", func() {
 	When("snapshot.spec.memory is true", func() {
 		BeforeEach(func() {
 			vmSnapshot.Spec.Memory = true
+			vm.Status.Hardware = &vmopv1.VirtualMachineHardwareStatus{
+				Memory: &vmopv1.VirtualMachineMemoryAllocationStatus{
+					Reservation: &size10GB,
+				},
+			}
 		})
 		It("should include the VM's memory in the requested capacity list", func() {
 			Expect(err).NotTo(HaveOccurred())
@@ -159,15 +164,16 @@ var _ = Describe("CalculateReservedForSnapshot", func() {
 		})
 	})
 
-	When("VMClass is not found", func() {
+	When("snapshot.spec.memory is true but vm.status.hardware.memory.reservation is nil", func() {
 		BeforeEach(func() {
 			vmSnapshot.Spec.Memory = true
-			vm.Status.PowerState = vmopv1.VirtualMachinePowerStateOn
-			vm.Spec.ClassName = "unknown-vm-class"
+			vm.Status.Hardware = nil
 		})
-		It("should return error", func() {
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("failed to get VMClass"))
+		It("should not include memory in the requested capacity list", func() {
+			Expect(err).NotTo(HaveOccurred())
+			Expect(requested).To(HaveLen(1))
+			Expect(requested[0].StorageClass).To(Equal(storageClass.Name))
+			Expect(requested[0].Total.Value()).To(Equal(size10GB.Value()))
 		})
 	})
 
