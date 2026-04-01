@@ -68,7 +68,9 @@ func unitTestsReconcile() {
 			ctx,
 			ctx.Client,
 			ctx.Logger,
-			ctx.Recorder)
+			ctx.Recorder,
+			nil,
+		)
 
 		_, err = reconciler.Reconcile(
 			context.Background(),

@@ -11,10 +11,15 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -37,11 +42,22 @@ func AddToManager(ctx *pkgctx.ControllerManagerContext, mgr manager.Manager) err
 		controllerNameLong  = fmt.Sprintf("%s/%s/%s", ctx.Namespace, ctx.Name, controllerNameShort)
 	)
 
+	separateCache, err := cache.New(mgr.GetConfig(), newSeparateCacheOptions(mgr.GetScheme()))
+	if err != nil {
+		return fmt.Errorf("creating separate cache: %w", err)
+	}
+	if err := mgr.Add(separateCache); err != nil {
+		return fmt.Errorf("adding separate cache to manager: %w", err)
+	}
+
 	r := NewReconciler(
 		ctx,
 		mgr.GetClient(),
 		ctrl.Log.WithName("controllers").WithName(controlledTypeName),
-		record.New(mgr.GetEventRecorderFor(controllerNameLong)))
+		record.New(mgr.GetEventRecorderFor(controllerNameLong)),
+		separateCache,
+		nil,
+	)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(controlledType).
@@ -56,22 +72,25 @@ func NewReconciler(
 	ctx context.Context,
 	client client.Client,
 	logger logr.Logger,
-	recorder record.Recorder) *Reconciler {
+	recorder record.Recorder,
+	separateCache cache.Cache) *Reconciler {
 
 	return &Reconciler{
-		Context:  ctx,
-		Client:   client,
-		Logger:   logger,
-		Recorder: recorder,
+		Context:       ctx,
+		Client:        client,
+		Logger:        logger,
+		Recorder:      recorder,
+		separateCache: separateCache,
 	}
 }
 
 // Reconciler reconciles a StorageClass object.
 type Reconciler struct {
 	client.Client
-	Context  context.Context
-	Logger   logr.Logger
-	Recorder record.Recorder
+	Context       context.Context
+	Logger        logr.Logger
+	Recorder      record.Recorder
+	separateCache cache.Cache
 }
 
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
@@ -83,6 +102,40 @@ func (r *Reconciler) Reconcile(
 
 	ctx = pkgcfg.JoinContext(ctx, r.Context)
 
+	// make a list of 100 different label key value pairs
+	labels := make([]map[string]string, 100)
+	for i := 0; i < 100; i++ {
+		labels[i] = map[string]string{
+			fmt.Sprintf("key%d", i): fmt.Sprintf("value%d", i),
+		}
+	}
+
+	logger := pkglog.FromContextOrDefault(ctx)
+
+	logger.Info("Fetching configmaps from cache", "request", req)
+	// now list configmap with above 100 label key value pairs separately for each label key value pair
+	for _, label := range labels {
+		configMapList := &corev1.ConfigMapList{}
+		err := r.separateCache.List(ctx, configMapList, ctrlclient.InNamespace(req.Namespace), ctrlclient.MatchingLabels(label))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	logger.Info("Configmaps fetched from cache", "request", req)
+
+	logger.Info("Fetching configmaps from api server", "request", req)
+	// now list configmap with above 100 label key value pairs separately for each label key value pair
+	for _, label := range labels {
+		configMapList := &corev1.ConfigMapList{}
+		err := r.Client.List(ctx, configMapList, ctrlclient.InNamespace(req.Namespace), ctrlclient.MatchingLabels(label))
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	logger.Info("Configmaps fetched from api server", "request", req)
+
 	var obj storagev1.StorageClass
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -93,6 +146,46 @@ func (r *Reconciler) Reconcile(
 	}
 
 	return ctrl.Result{}, r.ReconcileNormal(ctx, &obj)
+}
+
+// StripDataTransform returns a cache transform that removes .Data and .StringData
+// from ConfigMaps and Secrets to reduce memory usage.
+func StripDataTransform() toolscache.TransformFunc {
+	return func(obj interface{}) (interface{}, error) {
+		switch t := obj.(type) {
+		case *corev1.ConfigMap:
+			t.Data = nil
+			t.BinaryData = nil
+			if t.ObjectMeta.Annotations != nil {
+				delete(t.ObjectMeta.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
+			}
+			return t, nil
+		case *corev1.Secret:
+			t.Data = nil
+			t.StringData = nil
+			if t.ObjectMeta.Annotations != nil {
+				delete(t.ObjectMeta.Annotations, "kubectl.kubernetes.io/last-applied-configuration")
+			}
+			return t, nil
+		default:
+			return obj, nil
+		}
+	}
+}
+
+func newSeparateCacheOptions(scheme *runtime.Scheme) cache.Options {
+	return cache.Options{
+		Scheme: scheme,
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.ConfigMap{}: {
+				Transform: StripDataTransform(),
+			},
+			&corev1.Secret{}: {
+				Transform: StripDataTransform(),
+			},
+		},
+		ReaderFailOnMissingInformer: false,
+	}
 }
 
 func (r *Reconciler) ReconcileNormal(
